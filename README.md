@@ -4,7 +4,7 @@ Speech to text in your Swift app with OpenAI's Whisper large-v3-turbo, running o
 
 One Swift package, no dependencies. It downloads our Core ML build of the model from
 [Hugging Face](https://huggingface.co/mashbox-labs/whisper-large-v3-turbo-coreml-ane) at a pinned revision, checks
-every file against its SHA-256, keeps it on the device, and transcribes audio in 100 languages.
+every file against its SHA-256, keeps it on the device, and takes any of Whisper's 100 languages.
 
 ```swift
 import WhisperANE
@@ -61,11 +61,12 @@ end to end, from audio to text, median per clip.
 | Chinese (Mandarin) | 340 ms | 8.23% CER |
 | Thai | 537 ms | 13.76% CER |
 
-On the same clips and the same Mac, this build is 2.0x to 3.2x faster than
-[Argmax WhisperKit](https://github.com/argmaxinc/WhisperKit) v1.1.1 and 1.4x to 2.9x faster than
-[whisper.cpp](https://github.com/ggml-org/whisper.cpp) v1.9.5 with its Core ML encoder. The encoder takes 64.4 ms for
+On the same clips and the same Mac, this build (8-bit weights) is 2.0x to 3.2x faster than
+[Argmax WhisperKit](https://github.com/argmaxinc/WhisperKit) v1.1.1 with its 632 MB compressed turbo model, and 1.4x
+to 2.9x faster than [whisper.cpp](https://github.com/ggml-org/whisper.cpp) v1.9.5 with its Core ML encoder and
+OpenAI's weights at full precision (fp16). The encoder takes 64.4 ms for
 a 10 s window and 375.0 ms for a 30 s window. On iPhone Air, a 5 s Thai clip transcribes in 1.05 s, and the model
-loads from the system cache in 1.84 s. The card has the full tables.
+loads from the system cache in 1.84 s. The card has the full speed and accuracy tables for all three, and names the five languages scored.
 
 ## Requirements
 

@@ -18,6 +18,7 @@ import urllib.request
 
 REPO = "mashbox-labs/whisper-large-v3-turbo-coreml-ane"
 SKIP = {".gitattributes", "README.md"}
+SKIP_DIRS = ("assets/",)  # model card images, not needed to run
 NEEDED = {"manifest.json", "vocab.json", "embed_tokens.f16", "embed_positions.f16"}
 PACKAGES = ("MelSpectrogram.mlmodelc/", "AudioEncoder.mlmodelc/", "TextDecoder.mlmodelc/")
 
@@ -47,7 +48,7 @@ def main():
     files = []
     for e in sorted(tree(a.repo, a.revision), key=lambda e: e["path"]):
         path = e["path"]
-        if path in SKIP:
+        if path in SKIP or path.startswith(SKIP_DIRS):
             continue
         lfs = e.get("lfs")
         if lfs:
