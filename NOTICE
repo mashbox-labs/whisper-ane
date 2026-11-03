@@ -1,0 +1,14 @@
+WhisperANE
+Copyright 2026 MASHBOX Labs
+
+The code in this repository is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The model is not part of this repository. The package downloads it from
+https://huggingface.co/mashbox-labs/whisper-large-v3-turbo-coreml-ane, a Core ML conversion of
+Whisper large-v3-turbo by OpenAI (https://huggingface.co/openai/whisper-large-v3-turbo).
+Whisper large-v3-turbo is released by OpenAI under the MIT License, Copyright (c) 2022 OpenAI.
+The model repository carries OpenAI's LICENSE text unchanged.
+
+The decoding steps (the GPT-2 byte-level token decode, the suppress lists, language detection from the
+start token and the compression-ratio check) follow OpenAI's Whisper, https://github.com/openai/whisper,
+MIT License, Copyright (c) 2022 OpenAI.
