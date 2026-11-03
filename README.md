@@ -51,22 +51,22 @@ swift run -c release whisper-ane clip.wav
 
 From the [model card](https://huggingface.co/mashbox-labs/whisper-large-v3-turbo-coreml-ane): a MacBook Air (M5),
 the same 500 FLEURS test clips (100 per language), greedy decoding, no timestamps, the model already loaded. Time is
-end to end, from audio to text, median per clip.
+end to end, from audio to text, median per clip. The comparison is
+[whisper.cpp](https://github.com/ggml-org/whisper.cpp) v1.9.5 with its Core ML encoder, running OpenAI's weights at
+full precision (fp16).
 
-| Language | Median per clip | Error rate |
-|---|---|---|
-| English | 180 ms | 5.69% WER |
-| Japanese | 363 ms | 4.97% CER |
-| Korean | 339 ms | 3.63% CER |
-| Chinese (Mandarin) | 340 ms | 8.23% CER |
-| Thai | 537 ms | 13.76% CER |
+| Language | Median, this package | Median, whisper.cpp + Core ML | Error, this package | Error, whisper.cpp + Core ML |
+|---|---|---|---|---|
+| English | **176 ms** | 519 ms | 5.83% WER | **5.69% WER** |
+| Japanese | 605 ms | **578 ms** | 4.86% CER | **4.76% CER** |
+| Korean | 578 ms | **568 ms** | 3.58% CER | **3.31% CER** |
+| Chinese (Mandarin) | 574 ms | **569 ms** | 8.55% CER | **8.10% CER** |
+| Thai | 767 ms | **766 ms** | 13.21% CER | **12.87% CER** |
 
-On the same clips and the same Mac, this build (8-bit weights) is 2.0x to 3.2x faster than
-[Argmax WhisperKit](https://github.com/argmaxinc/WhisperKit) v1.1.1 with its 632 MB compressed turbo model, and 1.4x
-to 2.9x faster than [whisper.cpp](https://github.com/ggml-org/whisper.cpp) v1.9.5 with its Core ML encoder and
-OpenAI's weights at full precision (fp16). The encoder takes 64.4 ms for
-a 10 s window and 375.0 ms for a 30 s window. On iPhone Air, a 5 s Thai clip transcribes in 1.05 s, and the model
-loads from the system cache in 1.84 s. The card has the full speed and accuracy tables for all three, and names the five languages scored.
+English is about 2.9x faster than whisper.cpp with Core ML. Japanese, Korean and Chinese are about 1 to 5% slower,
+and Thai is even. The error rate is 0.10 to 0.45 points higher in each of the five languages. Both the encoder and the
+decoder run on the Neural Engine, in 833 MB of Neural Engine memory with both input windows loaded. The encoder takes
+65.7 ms for a 10 s window and 378.9 ms for a 30 s window. The card has the full tables and notes.
 
 ## Requirements
 
@@ -170,8 +170,7 @@ WHISPER_ANE_MODEL=/path/to/model WHISPER_ANE_AUDIO=/path/to/jfk.wav swift test
   model repo on Hugging Face carries OpenAI's `LICENSE` text unchanged.
 - Decoding steps follow [OpenAI's Whisper](https://github.com/openai/whisper) (MIT).
 - Conversion: [Core ML Tools](https://github.com/apple/coremltools) by Apple.
-- Compared against: [Argmax WhisperKit](https://github.com/argmaxinc/WhisperKit) (MIT) and
-  [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (MIT).
+- Compared against: [whisper.cpp](https://github.com/ggml-org/whisper.cpp) by ggml-org (MIT).
 - Evaluation data: [FLEURS](https://huggingface.co/datasets/google/fleurs) by Google, CC BY 4.0.
 
 The code in this repository is Apache-2.0 ([LICENSE](LICENSE), [NOTICE](NOTICE)).
