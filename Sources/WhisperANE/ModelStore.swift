@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 /// Downloads a pinned revision from Hugging Face once, checks every file's size and SHA-256, and keeps it in
@@ -16,9 +17,19 @@ enum ModelStore {
             .appendingPathComponent(pin.revision, isDirectory: true)
     }
 
+    /// The pin's folder and its download folder, both checked to stay under `root`.
+    static func paths(for pin: ModelPin, root: URL) throws -> (final: URL, partial: URL) {
+        try pin.checkPaths()
+        let final = folder(for: pin, root: root).standardizedFileURL
+        let partial = final.deletingLastPathComponent().appendingPathComponent(pin.revision + ".partial", isDirectory: true).standardizedFileURL
+        let base = root.standardizedFileURL.path.hasSuffix("/") ? root.standardizedFileURL.path : root.standardizedFileURL.path + "/"
+        guard final.path.hasPrefix(base), partial.path.hasPrefix(base) else { throw WhisperANEError.badPin("model folder leaves the cache") }
+        return (final, partial)
+    }
+
     /// True when the pinned revision is already downloaded and checked.
     static func isComplete(_ pin: ModelPin, root: URL) -> Bool {
-        let dir = folder(for: pin, root: root)
+        guard let dir = try? paths(for: pin, root: root).final else { return false }
         guard let marker = try? String(contentsOf: dir.appendingPathComponent(completeMarker), encoding: .utf8),
               marker.trimmingCharacters(in: .whitespacesAndNewlines) == pin.revision else { return false }
         return pin.files.allSatisfy { f in
@@ -28,14 +39,12 @@ enum ModelStore {
 
     static func ensure(_ pin: ModelPin, root: URL, progress: (@Sendable (Double) -> Void)?) async throws -> URL {
         if pin.isPlaceholder { throw WhisperANEError.notPinned }
-        try pin.checkPaths()
         let fm = FileManager.default
-        let final = folder(for: pin, root: root)
+        let (final, partial) = try paths(for: pin, root: root)
         if isComplete(pin, root: root) {
             progress?(1)
             return final
         }
-        let partial = final.deletingLastPathComponent().appendingPathComponent(pin.revision + ".partial", isDirectory: true)
         try fm.createDirectory(at: partial, withIntermediateDirectories: true)
         let total = max(1, pin.files.reduce(Int64(0)) { $0 + $1.size })
         var done: Int64 = 0
@@ -63,6 +72,12 @@ enum ModelStore {
             done += f.size
             progress?(Double(done) / Double(total))
         }
+        return try finish(pin, partial, final)
+    }
+
+    /// Marks `partial` complete and moves it into place.
+    private static func finish(_ pin: ModelPin, _ partial: URL, _ final: URL) throws -> URL {
+        let fm = FileManager.default
         try pin.revision.write(to: partial.appendingPathComponent(completeMarker), atomically: true, encoding: .utf8)
         if fm.fileExists(atPath: final.path) { try fm.removeItem(at: final) }
         try fm.moveItem(at: partial, to: final)
@@ -71,6 +86,74 @@ enum ModelStore {
         values.isExcludedFromBackup = true
         try? url.setResourceValues(values)
         return final
+    }
+
+    /// Copies every pinned file from a folder the package does not own into the cache and checks the copy, so the
+    /// bytes that load are the bytes that were hashed. Files the pin does not list are not copied, and a symbolic
+    /// link anywhere under `source` is refused. On APFS the copy is a clone: no extra disk, and later writes to
+    /// `source` do not reach it.
+    static func stage(_ pin: ModelPin, from source: URL, root: URL) throws -> URL {
+        if pin.isPlaceholder { throw WhisperANEError.notPinned }
+        let fm = FileManager.default
+        let (final, partial) = try paths(for: pin, root: root)
+        if isComplete(pin, root: root) { return final }
+        for f in pin.files {
+            let dest = partial.appendingPathComponent(f.path)
+            try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? fm.removeItem(at: dest)
+            try copyChecked(source, f, to: dest)
+        }
+        return try finish(pin, partial, final)
+    }
+
+    private static func copyChecked(_ source: URL, _ f: ModelPin.File, to dest: URL) throws {
+        var u = source
+        var st = stat()
+        for part in f.path.split(separator: "/") {
+            u.appendPathComponent(String(part))
+            guard lstat(u.path, &st) == 0 else { throw WhisperANEError.missingFile(f.path) }
+            if st.st_mode & S_IFMT == S_IFLNK { throw WhisperANEError.badModel("\(f.path) is a symbolic link") }
+        }
+        let src = open(u.path, O_RDONLY | O_NOFOLLOW)
+        guard src >= 0 else { throw WhisperANEError.missingFile(f.path) }
+        defer { close(src) }
+        guard fstat(src, &st) == 0, st.st_mode & S_IFMT == S_IFREG else { throw WhisperANEError.badModel("\(f.path) is not a regular file") }
+        if fclonefileat(src, AT_FDCWD, dest.path, 0) == 0 {
+            do { try check(dest, f) } catch { try? FileManager.default.removeItem(at: dest); throw error }
+            return
+        }
+        // Not clonable (another volume): copy and hash the same bytes in one pass.
+        let out = open(dest.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o644)
+        guard out >= 0 else { throw WhisperANEError.badModel("cannot write \(f.path): \(String(cString: strerror(errno)))") }
+        var ok = false
+        defer {
+            close(out)
+            if !ok { try? FileManager.default.removeItem(at: dest) }
+        }
+        let buf = UnsafeMutableRawBufferPointer.allocate(byteCount: 4 << 20, alignment: 16)
+        defer { buf.deallocate() }
+        var hasher = SHA256()
+        var size: Int64 = 0
+        while true {
+            let n = read(src, buf.baseAddress, buf.count)
+            if n < 0, errno == EINTR { continue }
+            guard n >= 0 else { throw WhisperANEError.badModel("cannot read \(f.path): \(String(cString: strerror(errno)))") }
+            if n == 0 { break }
+            let chunk = UnsafeRawBufferPointer(rebasing: buf[0..<n])
+            hasher.update(bufferPointer: chunk)
+            var written = 0
+            while written < n {
+                let w = write(out, chunk.baseAddress! + written, n - written)
+                if w < 0, errno == EINTR { continue }
+                guard w > 0 else { throw WhisperANEError.badModel("cannot write \(f.path): \(String(cString: strerror(errno)))") }
+                written += w
+            }
+            size += Int64(n)
+        }
+        guard size == f.size, hasher.finalize().map({ String(format: "%02x", $0) }).joined() == f.sha256.lowercased() else {
+            throw WhisperANEError.checksumMismatch(path: f.path)
+        }
+        ok = true
     }
 
     /// Size and SHA-256 of every pinned file in `folder`.
@@ -99,10 +182,12 @@ enum ModelStore {
     }
 
     static func url(_ pin: ModelPin, _ f: ModelPin.File) throws -> URL {
-        let path = f.path.split(separator: "/").map {
-            String($0).addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0)
-        }.joined(separator: "/")
-        guard let u = URL(string: "https://huggingface.co/\(pin.repo)/resolve/\(pin.revision)/\(path)") else {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove("/")
+        func encoded(_ s: String) -> String {
+            s.split(separator: "/").map { String($0).addingPercentEncoding(withAllowedCharacters: allowed) ?? String($0) }.joined(separator: "/")
+        }
+        guard let u = URL(string: "https://huggingface.co/\(encoded(pin.repo))/resolve/\(encoded(pin.revision))/\(encoded(f.path))") else {
             throw WhisperANEError.badPin("bad URL for \(f.path)")
         }
         return u

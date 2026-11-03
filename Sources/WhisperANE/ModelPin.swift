@@ -39,8 +39,18 @@ public struct ModelPin: Sendable, Codable, Equatable {
         try JSONDecoder().decode(ModelPin.self, from: Data(contentsOf: url))
     }
 
-    /// Rejects paths that could leave the model folder.
+    /// Rejects a repo, revision or path that could leave the model folder.
     func checkPaths() throws {
+        if revision.count != 40 || !revision.allSatisfy({ ("0"..."9").contains($0) || ("a"..."f").contains($0) }) {
+            throw WhisperANEError.badPin("revision must be a 40-character lowercase commit hash")
+        }
+        let names = repo.split(separator: "/", omittingEmptySubsequences: false)
+        if names.count != 2 || names.contains(where: { name in
+            guard let first = name.first, first.isASCII, first.isLetter || first.isNumber else { return true }
+            return name.contains("..") || !name.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "._-".contains($0)) }
+        }) {
+            throw WhisperANEError.badPin("repo must be owner/name")
+        }
         for f in files {
             let parts = f.path.split(separator: "/", omittingEmptySubsequences: false)
             if f.path.isEmpty || f.path.hasPrefix("/") || parts.contains("..") || parts.contains("") || parts.contains(".") {

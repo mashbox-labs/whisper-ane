@@ -2,6 +2,8 @@ import Foundation
 import XCTest
 @testable import WhisperANE
 
+private let rev = String(repeating: "a", count: 40)
+
 final class TokenizerTests: XCTestCase {
     func testByteTableCoversEveryByte() {
         let table = Tokenizer.unicodeToByteTable()
@@ -74,11 +76,44 @@ final class PinTests: XCTestCase {
     func testUnsafePathsAreRejected() {
         let sha = String(repeating: "0", count: 64)
         for path in ["../x", "/etc/passwd", "a/../../b", "a//b", "", "./a"] {
-            let pin = ModelPin(repo: "r/r", revision: "x", files: [.init(path: path, size: 1, sha256: sha)])
+            let pin = ModelPin(repo: "r/r", revision: rev, files: [.init(path: path, size: 1, sha256: sha)])
             XCTAssertThrowsError(try pin.checkPaths(), path)
         }
-        let bad = ModelPin(repo: "r/r", revision: "x", files: [.init(path: "a", size: 1, sha256: "zz")])
+        let bad = ModelPin(repo: "r/r", revision: rev, files: [.init(path: "a", size: 1, sha256: "zz")])
         XCTAssertThrowsError(try bad.checkPaths())
+    }
+
+    func testUnsafeRevisionsAndReposAreRejected() async {
+        let sha = String(repeating: "0", count: 64)
+        let files = [ModelPin.File(path: "a", size: 1, sha256: sha)]
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let traversal = "main/evil.plist?/" + String(repeating: "../", count: 20) + "tmp/x"
+        for revision in [traversal, "../" + rev, String(repeating: "A", count: 40), String(repeating: "a", count: 39), "main"] {
+            let pin = ModelPin(repo: "r/r", revision: revision, files: files)
+            XCTAssertThrowsError(try pin.checkPaths(), revision)
+            XCTAssertFalse(ModelStore.isComplete(pin, root: root), revision)
+            XCTAssertThrowsError(try ModelStore.verify(pin, folder: root), revision)
+            do {
+                _ = try await WhisperANE.load(pin: pin, cacheDirectory: root)
+                XCTFail("loaded \(revision)")
+            } catch {
+                guard case .badPin = error as? WhisperANEError else { return XCTFail("\(revision): \(error)") }
+            }
+        }
+        for repo in ["../x", "a/..", "a/../b", "a..b/c", "a", "a/b/c", "/a/b", "a/", ".a/b", "-a/b", "a/b?x", "a/b c", "é/b"] {
+            XCTAssertThrowsError(try ModelPin(repo: repo, revision: rev, files: files).checkPaths(), repo)
+        }
+        for repo in ["mashbox-labs/whisper-large-v3-turbo-coreml-ane", "o/m", "A1/b.c_d-e"] {
+            XCTAssertNoThrow(try ModelPin(repo: repo, revision: rev, files: files).checkPaths(), repo)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+    }
+
+    func testCacheFoldersStayUnderTheRoot() throws {
+        let root = URL(fileURLWithPath: "/tmp/wane-root")
+        let (final, partial) = try ModelStore.paths(for: ModelPin(repo: "o/m", revision: rev, files: []), root: root)
+        XCTAssertEqual(final.path, "/tmp/wane-root/o--m/\(rev)")
+        XCTAssertEqual(partial.path, "/tmp/wane-root/o--m/\(rev).partial")
     }
 
     func testPinRoundTripsAsJSON() throws {
@@ -93,6 +128,8 @@ final class PinTests: XCTestCase {
         let pin = ModelPin(repo: "mashbox-labs/m", revision: "abc", files: [])
         let u = try ModelStore.url(pin, .init(path: "AudioEncoder.mlmodelc/weights/weight.bin", size: 1, sha256: ""))
         XCTAssertEqual(u.absoluteString, "https://huggingface.co/mashbox-labs/m/resolve/abc/AudioEncoder.mlmodelc/weights/weight.bin")
+        let odd = try ModelStore.url(ModelPin(repo: "o/m", revision: "a?b#c", files: []), .init(path: "x", size: 1, sha256: ""))
+        XCTAssertEqual(odd.absoluteString, "https://huggingface.co/o/m/resolve/a%3Fb%23c/x")
     }
 }
 
@@ -115,7 +152,7 @@ final class ChecksumTests: XCTestCase {
 
     func testVerifyAcceptsMatchingFiles() throws {
         let dir = try folder(with: ["sub/abc": "abc"])
-        let pin = ModelPin(repo: "r/r", revision: "x", files: [
+        let pin = ModelPin(repo: "r/r", revision: rev, files: [
             .init(path: "sub/abc", size: 3, sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
         ])
         XCTAssertNoThrow(try ModelStore.verify(pin, folder: dir))
@@ -123,7 +160,7 @@ final class ChecksumTests: XCTestCase {
 
     func testVerifyRejectsAChangedFile() throws {
         let dir = try folder(with: ["abc": "abd"])
-        let pin = ModelPin(repo: "r/r", revision: "x", files: [
+        let pin = ModelPin(repo: "r/r", revision: rev, files: [
             .init(path: "abc", size: 3, sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
         ])
         XCTAssertThrowsError(try ModelStore.verify(pin, folder: dir)) {
@@ -134,8 +171,8 @@ final class ChecksumTests: XCTestCase {
     func testVerifyRejectsAWrongSizeAndAMissingFile() throws {
         let dir = try folder(with: ["abc": "abc"])
         let sha = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        XCTAssertThrowsError(try ModelStore.verify(ModelPin(repo: "r/r", revision: "x", files: [.init(path: "abc", size: 4, sha256: sha)]), folder: dir))
-        XCTAssertThrowsError(try ModelStore.verify(ModelPin(repo: "r/r", revision: "x", files: [.init(path: "nope", size: 3, sha256: sha)]), folder: dir)) {
+        XCTAssertThrowsError(try ModelStore.verify(ModelPin(repo: "r/r", revision: rev, files: [.init(path: "abc", size: 4, sha256: sha)]), folder: dir))
+        XCTAssertThrowsError(try ModelStore.verify(ModelPin(repo: "r/r", revision: rev, files: [.init(path: "nope", size: 3, sha256: sha)]), folder: dir)) {
             XCTAssertEqual($0 as? WhisperANEError, .missingFile("nope"))
         }
     }
@@ -143,15 +180,61 @@ final class ChecksumTests: XCTestCase {
     func testCompleteFolderNeedsTheMarkerAndEverySize() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let sha = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        let pin = ModelPin(repo: "o/m", revision: "rev1", files: [.init(path: "abc", size: 3, sha256: sha)])
+        let pin = ModelPin(repo: "o/m", revision: rev, files: [.init(path: "abc", size: 3, sha256: sha)])
         let dir = ModelStore.folder(for: pin, root: root)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try Data("abc".utf8).write(to: dir.appendingPathComponent("abc"))
         XCTAssertFalse(ModelStore.isComplete(pin, root: root))
-        try "rev1".write(to: dir.appendingPathComponent(ModelStore.completeMarker), atomically: true, encoding: .utf8)
+        try rev.write(to: dir.appendingPathComponent(ModelStore.completeMarker), atomically: true, encoding: .utf8)
         XCTAssertTrue(ModelStore.isComplete(pin, root: root))
         try Data("ab".utf8).write(to: dir.appendingPathComponent("abc"))
         XCTAssertFalse(ModelStore.isComplete(pin, root: root))
+    }
+
+    private let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+
+    func testStageCopiesOnlyPinnedFilesAndTheCopyIsWhatLoads() throws {
+        let src = try folder(with: ["sub/abc": "abc", "extra": "zzz"])
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let pin = ModelPin(repo: "o/m", revision: rev, files: [.init(path: "sub/abc", size: 3, sha256: abc)])
+        let dir = try ModelStore.stage(pin, from: src, root: root)
+        XCTAssertEqual(dir, try ModelStore.paths(for: pin, root: root).final)
+        XCTAssertTrue(ModelStore.isComplete(pin, root: root))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("extra").path))
+        try Data("abd".utf8).write(to: src.appendingPathComponent("sub/abc"))
+        XCTAssertEqual(try String(contentsOf: dir.appendingPathComponent("sub/abc"), encoding: .utf8), "abc")
+    }
+
+    func testStageRejectsSymlinksAndChangedFiles() throws {
+        let real = try folder(with: ["abc": "abc"])
+        let pin = ModelPin(repo: "o/m", revision: rev, files: [.init(path: "sub/abc", size: 3, sha256: abc)])
+        let linked = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: linked, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: linked.appendingPathComponent("sub"), withDestinationURL: real)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        XCTAssertThrowsError(try ModelStore.stage(pin, from: linked, root: root)) {
+            XCTAssertEqual($0 as? WhisperANEError, .badModel("sub/abc is a symbolic link"))
+        }
+        let fileLink = try folder(with: [:])
+        try FileManager.default.createDirectory(at: fileLink.appendingPathComponent("sub"), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: fileLink.appendingPathComponent("sub/abc"), withDestinationURL: real.appendingPathComponent("abc"))
+        XCTAssertThrowsError(try ModelStore.stage(pin, from: fileLink, root: root))
+        let changed = try folder(with: ["sub/abc": "abd"])
+        XCTAssertThrowsError(try ModelStore.stage(pin, from: changed, root: root)) {
+            XCTAssertEqual($0 as? WhisperANEError, .checksumMismatch(path: "sub/abc"))
+        }
+        XCTAssertFalse(ModelStore.isComplete(pin, root: root))
+    }
+}
+
+final class AudioTests: XCTestCase {
+    func testOutOfRangeLengthsThrowInsteadOfTrapping() {
+        XCTAssertEqual(try Audio.frameCapacity(480_000, sampleRate: 16_000), 480_000)
+        for (length, sr) in [(Int64(1) << 33, 48_000.0), (Int64(5 * 3600 * 16_000), 16_000), (100, 0), (100, -1), (100, .nan), (1 << 30, 1)] {
+            XCTAssertThrowsError(try Audio.frameCapacity(length, sampleRate: sr), "\(length) @ \(sr)") {
+                guard case .audio = $0 as? WhisperANEError else { return XCTFail("\($0)") }
+            }
+        }
     }
 }
 

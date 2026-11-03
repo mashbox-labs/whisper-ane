@@ -56,12 +56,18 @@ public actor WhisperANE {
 
     /// Loads a model folder you ship or host yourself (for example inside your app bundle).
     ///
-    /// - Parameter pin: when given, every file is checked against it before loading.
+    /// - Parameter pin: when given, the pinned files are copied into `Application Support/WhisperANE` (a clone on
+    ///   APFS), checked there and loaded from that copy, so a file changed after the check is never loaded. Symbolic
+    ///   links are refused and files the pin does not list are left out. Later loads of the same pin reuse the copy.
     public static func load(from folder: URL,
                             verifying pin: ModelPin? = nil,
                             computeUnits: MLComputeUnits = .cpuAndNeuralEngine) async throws -> WhisperANE {
+        var folder = folder
         if let pin {
-            try await Task.detached(priority: .userInitiated) { try ModelStore.verify(pin, folder: folder) }.value
+            let root = try ModelStore.defaultRoot()
+            folder = try await Task.detached(priority: .userInitiated) { [folder] in
+                try ModelStore.stage(pin, from: folder, root: root)
+            }.value
         }
         return try await open(folder, computeUnits: computeUnits)
     }
